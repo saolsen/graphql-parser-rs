@@ -2,6 +2,7 @@
 // in c to rust.
 
 use std::str::Chars;
+use std::iter::Peekable;
 
 #[derive(PartialEq, Debug)]
 enum Token {
@@ -25,54 +26,48 @@ fn get_char(query: &mut Chars) -> Result<char, &'static str> {
     }
 }
 
-fn next_token(next_ch: Option<char>, query: &mut Chars) -> Result<(Option<char>, Token), &'static str> {
-    
-
-    // @TODO: Use peek instead of this.
-    // https://adriann.github.io/rust_parser.html
-    let mut ch = next_ch;
-
+fn next_token(query: &mut Peekable<Chars>) -> Result<Token, &'static str> {
     // Skip Whitespace
     loop {
-        match ch {
+        match query.peek() {
             Some(',') | Some(' ') | Some('\n') | Some('\r') | Some('\t') => {
-                ch = query.next();
+                query.next();
             },
             Some('#') => {
-                ch = query.next();
+                query.next();
                 loop {
-                    match ch {
+                    match query.peek() {
                         None | Some('\n') => break,
-                        _ => ch = query.next()
-                    }
+                        _ => query.next()
+                    };
                 }
             }
             _ => break
         }
     }
 
-    match ch {
-        None => Ok((None, Token::EOF)),
+    match query.peek().cloned() {
+        None => Ok(Token::EOF),
         Some(c) => {
             match c {
                 // Number
-                d @ '-' | d @ '0' ... '9' => {
+                '-' | '0'...'9' => {
                     // @TODO: Better way to do this? Don't really wanna allocate here.
                     let mut num = String::new();
-                    num.push(d);
-                    ch = query.next();
+                    num.push(c);
+                    query.next();
                     let mut is_float = false;
                     loop {
-                        if let Some(c) = ch {
+                        if let Some(c) = query.peek().cloned() {
                             match c {
-                                d @ '0' ... '9' => {
-                                    num.push(d);
-                                    ch = query.next();
+                                '0'...'9' => {
+                                    num.push(c);
+                                    query.next();
                                     continue;
                                 },
-                                d @ '.' | d @ 'e' | d @ 'E' => {
-                                    num.push(d);
-                                    ch = query.next();
+                                '.' | 'e' | 'E' => {
+                                    num.push(c);
+                                    query.next();
                                     is_float = true;
                                     continue;
                                 },
@@ -83,13 +78,13 @@ fn next_token(next_ch: Option<char>, query: &mut Chars) -> Result<(Option<char>,
                     }
                     if is_float {
                         if let Ok(f) = num.parse::<f64>() {
-                           Ok((ch,Token::FloatValue(f)))
+                            Ok(Token::FloatValue(f))
                         } else {
                             Err("Error parsing float value.")
                         }
                     } else {
                         if let Ok(i) = num.parse::<i64>() {
-                            Ok((ch,Token::IntValue(i)))
+                            Ok(Token::IntValue(i))
                         } else {
                             Err("Error parsing int value.")
                         }
@@ -98,16 +93,16 @@ fn next_token(next_ch: Option<char>, query: &mut Chars) -> Result<(Option<char>,
 
                 // Name
                 // @TODO: intern strings
-                l @ 'a'...'z' | l @ 'A'...'Z' => {
+                'a'...'z' | 'A'...'Z' => {
                     let mut name = String::new();
-                    name.push(l);
-                    ch = query.next();
+                    name.push(c);
+                    query.next();
                     loop {
-                        if let Some(c) = ch {
+                        if let Some(c) = query.peek().cloned() {
                             match c {
-                                l @ 'a'...'z' | l @ 'A'...'Z' | l @ '0' ... '9' => {
-                                    name.push(l);
-                                    ch = query.next();
+                                'a'...'z' | 'A'...'Z' | '0' ... '9' => {
+                                    name.push(c);
+                                    query.next();
                                     continue
                                 }
                                 _ => ()
@@ -115,44 +110,45 @@ fn next_token(next_ch: Option<char>, query: &mut Chars) -> Result<(Option<char>,
                         }
                         break;
                     }
-                    Ok((ch,Token::Name(name)))
+                    Ok(Token::Name(name))
                 },
 
                 // String
                 '"' => {
                     let mut s = String::new();
-                    ch = query.next();
+                    query.next();
                     // @TODO: Handle escapes and block strings.
                     loop {
-                        match ch {
+                        match query.peek().cloned() {
                             Some('"') | None => {
-                                ch = query.next();
+                                query.next();
                                 break;
                             }
                             Some(c) => {
                                 s.push(c);
-                                ch = query.next();
+                                query.next();
                             }
                         }
                     }
-                    Ok((ch,Token::StringValue(s)))
+                    Ok(Token::StringValue(s))
                 },
 
                 // Punctuators
-                p @ '!' | p @ '$' | p @ '(' | p @ ')' | p @ ':' | p @ '=' | p @ '@' | p @ '[' | p @ ']' | p @ '{' | p @ '|' | p @ '}'  =>
-                    Ok((query.next(),Token::Punctuator(p))),
+                '!' | '$' | '(' | ')' | ':' | '=' | '@' | '[' | ']' | '{' | '|' | '}' => {
+                    query.next();
+                    Ok(Token::Punctuator(c))
+                },
                 '.' => {
-                    let n = query.next();
-                    let nn = query.next();
-                    ch = query.next();
-                    if let (Some('.'),Some('.')) = (n,nn) {
-                        Ok((ch, Token::Ellipsis))
+                    query.next();
+                    let p2 = query.next();
+                    let p3 = query.next();
+                    if let (Some('.'),Some('.')) = (p2,p3) {
+                        Ok(Token::Ellipsis)
                     } else {
                         Err("Error parsing ellipses.")
                     }
                 },
-
-                _ => Err("Parse Error, unexpected initial token character")
+                _ => Err("Error, unexpeced initial token.")
             }
         }
     }
@@ -160,13 +156,11 @@ fn next_token(next_ch: Option<char>, query: &mut Chars) -> Result<(Option<char>,
 
 fn main() {
     let query: &'static str = "abZc #comment \n  def \"a string\" 123 12.9e24 ... ! [] | 123 wuoah";
-    let mut iter = query.chars();
-    let mut ch = iter.next();
+    let mut iter = query.chars().peekable();
     loop {
-        match next_token(ch, &mut iter) {
-            Ok((next_ch,token)) => {
+        match next_token(&mut iter) {
+            Ok(token) => {
                 println!("Token: {:?}", token);
-                ch = next_ch;
                 if token == Token::EOF {
                     break;
                 }
