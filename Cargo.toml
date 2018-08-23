@@ -1,0 +1,6 @@
+[package]
+name = "graphql-parser"
+version = "0.1.0"
+authors = ["Stephen Olsen <steve.olsen@gmail.com>"]
+
+[dependencies]
