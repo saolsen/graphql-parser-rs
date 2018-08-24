@@ -302,7 +302,7 @@ struct Document {
 }
 
 fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
-    match lexer.token {
+    let v = match lexer.token {
         Token::Punctuator('$') => {
             lexer.next_token()?;
             Ok(Value::Variable(lexer.token_name()?))
@@ -345,19 +345,24 @@ fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
             Ok(Value::ObjectValue(obj))
         },
         _ => Err("Error parsing value")
-    }
+    };
+    lexer.next_token()?;
+    v
 }
 
 // arguments
 fn parse_arguments(mut lexer: &mut Lexer) -> Result<Vec<Argument>, &'static str> {
     let mut args = vec![];
     if lexer.token == Token::Punctuator('(') {
+        lexer.next_token()?;
         while lexer.token != Token::Punctuator(')') {
-            let name = lexer.token_name()?;
+            let name= lexer.token_name()?;
+            lexer.next_token()?;
             lexer.expect_token(Token::Punctuator(':'))?;
             let value = parse_value(&mut lexer)?;
             args.push(Argument{name, value})
         }
+        lexer.next_token()?;
     }
     Ok(args)
 }
@@ -546,8 +551,8 @@ fn parse_query(query: &str) -> Result<Document, &'static str> {
 }
 
 fn main() {
-    let query = "{ hello }";
+    let query = "{ sup(foo: \"bar\") {hi} }";
     println!("Parsing {}", query);
-    let doc = parse_query("{ sup(foo: \"bar\") {hi} }");
+    let doc = parse_query(query);
     println!("{:#?}", doc);
 }
