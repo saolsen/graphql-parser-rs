@@ -2,8 +2,12 @@
 // in c to rust.
 
 // @TODO: Use a string intern table to speed up the parse.
-
+// @TODO: Better errors.
 #![feature(nll)]
+
+#[macro_use] extern crate proptest;
+use proptest::prelude::*;
+use proptest::test_runner::Config;
 
 use std::str::Chars;
 use std::iter::Peekable;
@@ -58,7 +62,7 @@ fn get_next_token(query: &mut Peekable<Chars>) -> Result<Token, &'static str> {
                                     query.next();
                                     continue;
                                 },
-                                '.' | 'e' | 'E' => {
+                                '.' | 'e' | 'E' | '-' => {
                                     num.push(c);
                                     query.next();
                                     is_float = true;
@@ -210,8 +214,6 @@ mod tests {
     }
 }
 
-// matchToken and expectToken are big ones used by the other parsing code in c.
-
 #[derive(PartialEq, Debug)]
 enum TypeDef {
     List { typedef: Box<TypeDef> },
@@ -219,17 +221,38 @@ enum TypeDef {
     Named { name: String }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 enum Value {
     IntValue(i64),
     FloatValue(f64),
     Variable(String),
     StringValue(String),
     BoolValue(bool),
-    Null,
-    EnumValue(String),
-    ListValue(Vec<Value>),
-    ObjectValue(Vec<(String,Value)>)
+    NullValue,
+    Enum(String),
+    List(Vec<Value>),
+    Object(Vec<(String,Value)>)
+}
+
+fn print_value(val: &Value) -> String {
+    match val {
+        Value::IntValue(i) => format!("{}", i),
+        Value::FloatValue(f) => format!("{:.e}", f),
+        Value::Variable(v) => format!("${}", v),
+        Value::StringValue(s) => format!("\"{}\"", s),
+        Value::BoolValue(true) => "true".to_string(),
+        Value::BoolValue(false) => "false".to_string(),
+        Value::NullValue => "null".to_string(),
+        Value::Enum(e) => format!("{}", e),
+        Value::List(l) => {
+            let items = l.iter().map(|v| print_value(v)).collect::<Vec<String>>();
+            format!("[{}]", items.join(", "))
+        },
+        Value::Object(o) => {
+            let items = o.iter().map(|kvp| format!("{}: {}", kvp.0, print_value(&kvp.1))).collect::<Vec<String>>();
+            format!("{{{}}}", items.join(", "))
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -320,8 +343,8 @@ fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
             match n.as_str() {
                 "true" => Ok(Value::BoolValue(true)),
                 "false" => Ok(Value::BoolValue(false)),
-                "null" => Ok(Value::Null),
-                _ => Ok(Value::EnumValue(n.clone()))
+                "null" => Ok(Value::NullValue),
+                _ => Ok(Value::Enum(n.clone()))
             }
         },
         Token::Punctuator('[') => {
@@ -330,7 +353,7 @@ fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
             while lexer.token != Token::Punctuator(']') {
                 list.push(parse_value(&mut lexer)?);
             }
-            Ok(Value::ListValue(list))
+            Ok(Value::List(list))
         },
         Token::Punctuator('{') => {
             lexer.next_token()?;
@@ -342,7 +365,7 @@ fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
                 let val = parse_value(&mut lexer)?;
                 obj.push((name,val));
             }
-            Ok(Value::ObjectValue(obj))
+            Ok(Value::Object(obj))
         },
         _ => Err("Error parsing value")
     };
@@ -542,17 +565,78 @@ fn parse_query(query: &str) -> Result<Document, &'static str> {
             Token::Name(ref s) if s == "fragment" => {
                 fragments.push(parse_fragment_definition(&mut lexer)?)
             },
-            _ => {
+            Token::Name(_) | Token::Punctuator('{') => {
                 operations.push(parse_operation_definition(&mut lexer)?)
+            }
+            _ => {
+                return Err("Unknown Initial Token")
             }
         }
     }
-    Ok(Document { fragments, operations})
+    Ok(Document {fragments, operations})
+}
+
+/* prop_compose! {
+    fn gen_value()(v in any::<i64>()) -> Value {
+        Value::IntValue(v)
+    }
+} */
+
+fn gen_value() -> BoxedStrategy<Value> {
+    let leaf = prop_oneof![
+        any::<i64>().prop_map(Value::IntValue),
+        any::<f64>().prop_map(Value::FloatValue),
+        "([A-Z][a-z])([A-Z][a-z][0-9])*".prop_map(Value::Variable),
+        "[^\"]*".prop_map(Value::StringValue),
+        any::<bool>().prop_map(Value::BoolValue),
+        Just(Value::NullValue),
+        "([A-Z][a-z])([A-Z][a-z][0-9])*".prop_map(Value::Enum)
+    ];
+    leaf.prop_recursive(
+        3,
+        50,
+        10,
+        |inner| prop_oneof![
+            prop::collection::vec(inner.clone(), 0..10)
+                .prop_map(Value::List),
+            prop::collection::hash_map("([A-Z][a-z])([A-Z][a-z][0-9])*", inner, 0..10)
+                .prop_map(|vals|
+                    Value::Object(
+                        vals.iter().map(|(k,v)| (k.to_owned(), v.to_owned()))
+                        .collect())
+                    )
+        ]).boxed()
+}
+
+proptest! {
+    //#![proptest_config(Config::with_cases(10000))]
+    #[test]
+    fn test_parse_value(v in gen_value()) {
+        let s = print_value(&v);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_v = parse_value(&mut lex).unwrap();
+        assert!(parsed_v == v);
+    }
+
+    #[test]
+    fn test_parse_query(s in "\\PC*") {
+        parse_query(&s)
+    }
+
+    #[test]
+    fn test_parse_int_value(ref v in gen_value()) {
+        //println!("{:#?}", v);
+        if let Value::IntValue(val) = v {
+            assert!(*val != 1024)
+        }
+    }
 }
 
 fn main() {
-    let query = "{ sup(foo: \"bar\") {hi} }";
-    println!("Parsing {}", query);
-    let doc = parse_query(query);
-    println!("{:#?}", doc);
+    let value = Value::Object(vec![]);
+    let s = print_value(&value);
+    println!("{}", s);
+    let mut lex = Lexer::new(&s).unwrap();
+    let parsed = parse_value(&mut lex).unwrap();
+    println!("{:?}", parsed);
 }
