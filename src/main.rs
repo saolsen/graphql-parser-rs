@@ -3,14 +3,21 @@
 
 // @TODO: Use a string intern table to speed up the parse.
 // @TODO: Better errors.
+#![recursion_limit = "1024"]
 #![feature(nll)]
+
+#[macro_use]
+extern crate error_chain;
+
+use std::str::Chars;
+use std::iter::Peekable;
+
 
 #[macro_use] extern crate proptest;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
 
-use std::str::Chars;
-use std::iter::Peekable;
+
 
 #[derive(PartialEq, Debug)]
 enum Token {
@@ -214,11 +221,25 @@ mod tests {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 enum TypeDef {
     List { typedef: Box<TypeDef> },
     NonNull { typedef: Box<TypeDef> },
     Named { name: String }
+}
+
+fn print_typedef(t: &TypeDef) -> String{
+    match t {
+        TypeDef::List{typedef: l} => {
+            format!("[{}]", print_typedef(l))
+        },
+        TypeDef::NonNull{typedef: n} => {
+            format!("{}!", print_typedef(n))
+        },
+        TypeDef::Named{name: n} => {
+            n.to_string()
+        }
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -261,10 +282,31 @@ struct Argument {
     value: Value
 }
 
+fn print_argument(arg: &Argument) -> String {
+    format!("{}: {}", arg.name, print_value(&arg.value))
+}
+
+fn print_arguments(args: &Vec<Argument>) -> String {
+    if args.is_empty() {
+        "".to_string()
+    } else {
+        let inner = args.iter().map(print_argument).collect::<Vec<String>>();
+        format!("({})", inner.join(", "))
+    }
+}
+
 #[derive(PartialEq, Debug)]
 struct Directive {
     name: String,
     arguments: Vec<Argument>
+}
+
+fn print_directive(d: &Directive) -> String {
+    format!("@{}{}", d.name, print_arguments(&d.arguments))
+}
+
+fn print_directives(d: &Vec<Directive>) -> String {
+    d.iter().map(print_directive).collect::<Vec<String>>().join(", ")
 }
 
 #[derive(PartialEq, Debug)]
@@ -273,6 +315,10 @@ struct Fragment {
     on: String,
     directives: Vec<Directive>,
     selection_set: Vec<Selection>,
+}
+
+fn print_fragment(f: &Fragment) -> String {
+    format!("fragment {} on {} {} {}", f.name, f.on, print_directives(&f.directives), print_selection_set(&f.selection_set))
 }
 
 #[derive(PartialEq, Debug)]
@@ -295,6 +341,33 @@ enum Selection {
     }
 }
 
+fn print_selection(s: &Selection) -> String {
+    match s {
+        Selection::Field{alias, name, arguments, directives, selection_set} => {
+            let mut alias_prefix = String::new();
+            if let Some(a) = alias {
+                alias_prefix = format!("{}: ", a)
+            }
+            format!("{}{}{}{}{}", alias_prefix, name, print_arguments(&arguments), print_directives(&directives), print_selection_set(&selection_set))
+        },
+        Selection::FragmentSpread{name, directives} => {
+            format!("... {} {}", name, print_directives(directives))
+        },
+        Selection::InlineFragment{on, directives, selection_set} => {
+            format!("... on {} {}{}", on, print_directives(&directives), print_selection_set(&selection_set))
+        }
+    }
+}
+
+fn print_selection_set(ss: &Vec<Selection>) -> String {
+    if ss.is_empty() {
+        "".to_string()
+    } else {
+        let inner = ss.iter().map(print_selection).collect::<Vec<String>>();
+        format!("{{{}}}", inner.join(", "))
+    }
+}
+
 #[derive(PartialEq, Debug)]
 struct VariableDefinition {
     name: String,
@@ -302,11 +375,36 @@ struct VariableDefinition {
     default_value: Option<Value>
 }
 
-#[derive(PartialEq, Debug)]
+fn print_variable_definition(v: &VariableDefinition) -> String {
+    if let Some(ref default_value) = v.default_value {
+        format!("${}: {} = {}", v.name, print_typedef(&v.typedef), print_value(&default_value))
+    } else {
+        format!("${}: {}", v.name, print_typedef(&v.typedef))
+    }    
+}
+
+fn print_variable_definitions(vs: &Vec<VariableDefinition>) -> String {
+    if vs.is_empty() {
+        "".to_string()
+    } else {
+        let inner = vs.iter().map(print_variable_definition).collect::<Vec<String>>();
+        format!("({})", inner.join(", "))
+    }
+}
+
+#[derive(PartialEq, Debug, Copy, Clone)]
 enum OperationKind {
     Query,
     Mutation,
     Subscription
+}
+
+fn print_op_kind(kind: &OperationKind) -> String {
+    match kind {
+        OperationKind::Query => "query".to_string(),
+        OperationKind::Mutation => "mutation".to_string(),
+        OperationKind::Subscription => "subscription".to_string()
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -318,11 +416,27 @@ struct Operation {
     selection_set: Vec<Selection>
 }
 
+fn print_operation(op: &Operation) -> String {
+    if let Some(ref name) = op.name {
+        format!("{} {} {} {} {}", print_op_kind(&op.kind), name, print_variable_definitions(&op.variable_definitions), print_directives(&op.directives), print_selection_set(&op.selection_set))
+    } else {
+        format!("{} {} {} {}", print_op_kind(&op.kind), print_variable_definitions(&op.variable_definitions), print_directives(&op.directives), print_selection_set(&op.selection_set))
+    }
+}
+
 #[derive(PartialEq, Debug)]
 struct Document {
     fragments: Vec<Fragment>,
     operations: Vec<Operation>
 }
+
+fn print_document(doc: &Document) -> String {
+    let ops = doc.operations.iter().map(print_operation).collect::<Vec<String>>();
+    let frags = doc.fragments.iter().map(print_fragment).collect::<Vec<String>>();
+    format!("{}{}", ops.join(" "), frags.join(" "))
+}
+
+// Parsing
 
 fn parse_value(mut lexer: &mut Lexer) -> Result<Value, &'static str> {
     let v = match lexer.token {
@@ -396,6 +510,7 @@ fn parse_directives(mut lexer: &mut Lexer) -> Result<Vec<Directive>, &'static st
     while lexer.token == Token::Punctuator('@') {
         lexer.next_token()?;
         let name = lexer.token_name()?;
+        lexer.next_token()?;
         let arguments = parse_arguments(&mut lexer)?;
         directives.push(Directive{name, arguments})
     }
@@ -470,7 +585,11 @@ fn parse_type_def(mut lexer: &mut Lexer) -> Result<TypeDef, &'static str> {
 
     if lexer.token == Token::Punctuator('!') {
         lexer.next_token()?;
-        Ok(TypeDef::NonNull {typedef: Box::new(t)})
+        if let TypeDef::NonNull{typedef: _} = t {
+            Err("Cannot have a nonnull nonull type.")
+        } else {
+            Ok(TypeDef::NonNull {typedef: Box::new(t)})
+        }
     } else {
         Ok(t)
     }
@@ -497,6 +616,7 @@ fn parse_variable_definitions(mut lexer: &mut Lexer) -> Result<Vec<VariableDefin
             };
             variable_definitions.push(VariableDefinition{name, typedef, default_value})
         }
+        lexer.next_token()?;
     }
     Ok(variable_definitions)
 }
@@ -524,7 +644,7 @@ fn parse_operation_definition(mut lexer: &mut Lexer) -> Result<Operation, &'stat
         variable_definitions = parse_variable_definitions(&mut lexer)?;
         directives = parse_directives(&mut lexer)?;
     }
-
+    
     let selection_set = parse_selection_set(&mut lexer)?;
 
     Ok(Operation{
@@ -576,21 +696,35 @@ fn parse_query(query: &str) -> Result<Document, &'static str> {
     Ok(Document {fragments, operations})
 }
 
-/* prop_compose! {
-    fn gen_value()(v in any::<i64>()) -> Value {
-        Value::IntValue(v)
+prop_compose! {
+    fn gen_name()(n in "([A-Z][a-z])([A-Z][a-z][0-9])*") -> String {
+        n
     }
-} */
+}
+
+fn gen_typedef() -> BoxedStrategy<TypeDef> {
+    let leaf = prop_oneof![
+        gen_name().prop_map(|v| TypeDef::Named{name: v}),
+    ];
+    leaf.prop_recursive(
+        3,
+        50,
+        10,
+        |inner| prop_oneof![
+            //inner.clone().prop_map(|i| TypeDef::NonNull{typedef: Box::new(i)}),
+            inner.clone().prop_map(|i| TypeDef::List{typedef: Box::new(i)})
+        ]).boxed()
+}
 
 fn gen_value() -> BoxedStrategy<Value> {
     let leaf = prop_oneof![
         any::<i64>().prop_map(Value::IntValue),
         any::<f64>().prop_map(Value::FloatValue),
-        "([A-Z][a-z])([A-Z][a-z][0-9])*".prop_map(Value::Variable),
+        gen_name().prop_map(Value::Variable),
         "[^\"]*".prop_map(Value::StringValue),
         any::<bool>().prop_map(Value::BoolValue),
         Just(Value::NullValue),
-        "([A-Z][a-z])([A-Z][a-z][0-9])*".prop_map(Value::Enum)
+        gen_name().prop_map(Value::Enum)
     ];
     leaf.prop_recursive(
         3,
@@ -599,7 +733,7 @@ fn gen_value() -> BoxedStrategy<Value> {
         |inner| prop_oneof![
             prop::collection::vec(inner.clone(), 0..10)
                 .prop_map(Value::List),
-            prop::collection::hash_map("([A-Z][a-z])([A-Z][a-z][0-9])*", inner, 0..10)
+            prop::collection::hash_map(gen_name(), inner, 0..10)
                 .prop_map(|vals|
                     Value::Object(
                         vals.iter().map(|(k,v)| (k.to_owned(), v.to_owned()))
@@ -608,8 +742,70 @@ fn gen_value() -> BoxedStrategy<Value> {
         ]).boxed()
 }
 
+prop_compose! {
+    fn gen_argument()(name in gen_name(), value in gen_value()) -> Argument {
+        Argument{name, value}
+    }
+}
+
+prop_compose! {
+    fn gen_directive()(name in gen_name(), arguments in prop::collection::vec(gen_argument(), 0..10)) -> Directive {
+        Directive{name, arguments}
+    }
+}
+
+fn gen_selection() -> BoxedStrategy<Selection> {
+    let leaf = prop_oneof![
+        (gen_name(), prop::collection::vec(gen_directive(), 0..10))
+            .prop_map(|(name, directives)| Selection::FragmentSpread{name, directives})
+    ];
+    leaf.prop_recursive(
+        3,
+        10,
+        5,
+        |inner| prop_oneof![
+            (gen_name(), prop::collection::vec(gen_directive(), 0..10), prop::collection::vec(inner.clone(), 0..5))
+                .prop_map(|(on, directives, selection_set)| Selection::InlineFragment{on, directives, selection_set}),
+            (prop::option::of(gen_name()), gen_name(), prop::collection::vec(gen_argument(), 0..10), prop::collection::vec(gen_directive(), 0..10), prop::collection::vec(inner.clone(), 0..5))
+                .prop_map(|(alias, name, arguments, directives, selection_set)| Selection::Field{alias, name, arguments, directives, selection_set})
+    ]).boxed()
+}
+
+prop_compose! {
+    fn gen_fragment()(name in gen_name(), on in gen_name(), directives in prop::collection::vec(gen_directive(), 0..10), selection_set in prop::collection::vec(gen_selection(), 1..5)) -> Fragment {
+        Fragment{name, on, directives, selection_set}
+    }
+}
+
+prop_compose! {
+    fn gen_variable_definition()(name in gen_name(), typedef in gen_typedef(), default_value in prop::option::of(gen_value())) -> VariableDefinition {
+        VariableDefinition{name, typedef, default_value}
+    }
+}
+
+prop_compose! {
+    fn gen_operation()(kind in prop_oneof![Just(OperationKind::Query), Just(OperationKind::Mutation), Just(OperationKind::Subscription)], name in prop::option::of(gen_name()), variable_definitions in prop::collection::vec(gen_variable_definition(), 0..5), directives in prop::collection::vec(gen_directive(), 0..5), selection_set in prop::collection::vec(gen_selection(), 1..10)) -> Operation {
+        Operation{kind, name, variable_definitions, directives, selection_set}
+    }
+}
+
+prop_compose! {
+    fn gen_document()(fragments in prop::collection::vec(gen_fragment(), 0..3), operations in prop::collection::vec(gen_operation(), 0..3)) -> Document {
+        Document{fragments, operations}
+    }
+}
+
 proptest! {
     //#![proptest_config(Config::with_cases(10000))]
+
+    #[test]
+    fn test_parse_typedef(t in gen_typedef()) {
+        let s = print_typedef(&t);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_t = parse_type_def(&mut lex).unwrap();
+        assert!(parsed_t == t);
+    }
+
     #[test]
     fn test_parse_value(v in gen_value()) {
         let s = print_value(&v);
@@ -619,24 +815,87 @@ proptest! {
     }
 
     #[test]
-    fn test_parse_query(s in "\\PC*") {
-        parse_query(&s)
+    fn test_parse_arguments(args in prop::collection::vec(gen_argument(), 0..5)) {
+        let s = print_arguments(&args);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_args = parse_arguments(&mut lex).unwrap();
+        assert!(parsed_args == args)
     }
 
     #[test]
-    fn test_parse_int_value(ref v in gen_value()) {
-        //println!("{:#?}", v);
-        if let Value::IntValue(val) = v {
-            assert!(*val != 1024)
-        }
+    fn test_parse_directives(dirs in prop::collection::vec(gen_directive(), 0..5)) {
+        let s = print_directives(&dirs);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_dirs = parse_directives(&mut lex).unwrap();
+        assert!(parsed_dirs == dirs)
+    }
+
+    #[test]
+    fn test_parse_fragment(fragment in gen_fragment()) {
+        let s = print_fragment(&fragment);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_f = parse_fragment_definition(&mut lex).unwrap();
+        assert!(parsed_f == fragment)
+    }
+
+    #[test]
+    fn test_parse_selection_set(selection_set in prop::collection::vec(gen_selection(), 0..5)) {
+        let s = print_selection_set(&selection_set);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_ss = parse_selection_set(&mut lex).unwrap();
+        assert!(parsed_ss == selection_set)
+    }
+
+    #[test]
+    fn test_parse_variable_definitions(vars in prop::collection::vec(gen_variable_definition(), 0..5)) {
+        let s = print_variable_definitions(&vars);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_v = parse_variable_definitions(&mut lex).unwrap();
+        assert!(parsed_v == vars)
+    }
+
+    #[test]
+    fn test_parse_operation(operation in gen_operation()) {
+        let s = print_operation(&operation);
+        let mut lex = Lexer::new(&s).unwrap();
+        let parsed_op = parse_operation_definition(&mut lex).unwrap();
+        assert!(parsed_op == operation)
+    }
+
+    #[test]
+    fn test_parse_document(doc in gen_document()) {
+        let s = print_document(&doc);
+        let parsed_doc = parse_query(&s).unwrap();
+        assert!(doc == parsed_doc)
+    }
+
+    #[test]
+    fn test_parse_garbage(s in "\\PC*") {
+        parse_query(&s)
     }
 }
 
+// @TODO: Do lifetimes right now that I know about the reference stored in the lexer.
+
 fn main() {
-    let value = Value::Object(vec![]);
+    /* let t = TypeDef::NonNull{typedef: Box::new(TypeDef::NonNull{})}
     let s = print_value(&value);
     println!("{}", s);
     let mut lex = Lexer::new(&s).unwrap();
     let parsed = parse_value(&mut lex).unwrap();
-    println!("{:?}", parsed);
+    println!("{:?}", parsed); */
+    /* let dirs = vec![Directive{name:"Aa".to_string(), arguments: vec![Argument{name: "Aa".to_string(), value: Value::IntValue(0)}]}];
+    let s = print_directives(&dirs);
+    println!("{}", s);
+    let mut lex = Lexer::new(&s).unwrap();
+    let parsed = parse_directives(&mut lex).unwrap();
+    println!("{:?}", parsed) */
+
+    let op = Operation{kind: OperationKind::Query, name: None, variable_definitions: vec![VariableDefinition { name: "Aa".to_string(), typedef: TypeDef::Named { name: "Aa".to_string() }, default_value: None }], directives: vec![], selection_set: vec![Selection::FragmentSpread { name: "Aa".to_string(), directives: vec![] }] };
+    println!("{:?}", op);
+    let s = print_operation(&op);
+    println!("{}", s);
+    let mut lex = Lexer::new(&s).unwrap();
+    let parsed = parse_operation_definition(&mut lex).unwrap();
+    println!("{:?}", parsed)
 }
